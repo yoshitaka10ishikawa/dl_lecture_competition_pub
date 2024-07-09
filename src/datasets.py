@@ -4,6 +4,33 @@ import torch
 from typing import Tuple
 from termcolor import cprint
 
+### NOTE: 追加ライブラリ
+import torch.nn.functional as F
+from scipy.signal import resample, butter, filtfilt
+
+### NOTE: 脳波（EEG）データの前処理
+### リサンプリング: 元のサンプリング周波数（1000 Hzと仮定）から新しい周波数（デフォルトで100 Hz）にデータをリサンプリングする。
+### バンドパスフィルタリング: バンドパスフィルタを適用して、1 Hzから40 Hzの周波数帯の信号を抽出する。バターワースフィルタを使用する。
+### 正規化: zスコア正規化を行い、データを平均0、標準偏差1の分布に変換する。
+def preprocess_eeg(data, fs_new=100):
+    # Original sampling frequency (assuming 1000 Hz)
+    fs = 1000
+    
+    # Resample to new frequency
+    data_resampled = resample(data, int(data.shape[-1] * fs_new / fs), axis=-1)
+    
+    # Apply a bandpass filter (1-40 Hz)
+    nyquist = 0.5 * fs_new
+    low = 1 / nyquist
+    high = 40 / nyquist
+    b, a = butter(1, [low, high], btype='band')
+    data_filtered = filtfilt(b, a, data_resampled, axis=-1)
+    
+    # Normalize (z-score)
+    data_normalized = (data_filtered - np.mean(data_filtered, axis=-1, keepdims=True)) / np.std(data_filtered, axis=-1, keepdims=True)
+    
+    return data_normalized
+
 
 class ThingsMEGDataset(torch.utils.data.Dataset):
     def __init__(self, split: str, data_dir: str = "data") -> None:
