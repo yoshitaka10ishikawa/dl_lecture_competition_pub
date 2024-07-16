@@ -11,6 +11,22 @@ import torch.nn as nn
 import torchvision
 from torchvision import transforms
 
+### NOTE: 追加ライブラリ
+from transformers import BertModel, BertTokenizer
+import re
+import string
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+
+import torchvision.transforms as transforms
+from PIL import Image
+from tqdm import tqdm
+
+# nltk.download('punkt')
+# nltk.download('stopwords')
+# nltk.download('wordnet')
 
 def set_seed(seed):
     random.seed(seed)
@@ -68,6 +84,9 @@ class VQADataset(torch.utils.data.Dataset):
         self.image_dir = image_dir  # 画像ファイルのディレクトリ
         self.df = pandas.read_json(df_path)  # 画像ファイルのパス，question, answerを持つDataFrame
         self.answer = answer
+
+        ### NOTE: 質問文の大文字・小文字の統一冠詞の削除
+        self.df['question'] = self.df['question'].apply(self.preprocess_question)
 
         # question / answerの辞書を作成
         self.question2idx = {}
@@ -149,6 +168,39 @@ class VQADataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.df)
+    
+    ### NOTE: 大文字・小文字の統一と冠詞の削除
+    # def preprocess_question(self, question):
+    #     # 大文字・小文字を統一する
+    #     question = question.lower()
+    #     # 冠詞の削除
+    #     question = re.sub(r'\b(a|an|the)\b', '', question)
+    #     # 不要な空白の削除
+    #     question = question.strip()
+    #     return question
+    
+    def preprocess_question(self, question):
+        # Convert to lowercase
+        question = question.lower()
+        
+        # Remove punctuation
+        question = question.translate(str.maketrans('', '', string.punctuation))
+        
+        # Tokenization
+        tokens = word_tokenize(question)
+        
+        # Remove stopwords
+        stop_words = set(stopwords.words('english'))
+        tokens = [word for word in tokens if word not in stop_words]
+        
+        # Lemmatization
+        lemmatizer = WordNetLemmatizer()
+        tokens = [lemmatizer.lemmatize(word) for word in tokens]
+        
+        # Join tokens back into a string
+        processed_question = ' '.join(tokens)
+        
+        return processed_question
 
 
 # 2. 評価指標の実装
@@ -286,12 +338,43 @@ def ResNet18():
 def ResNet50():
     return ResNet(BottleneckBlock, [3, 4, 6, 3])
 
+### NOTE: tokenizerを用いた分散表現
+class TextEncoder(nn.Module):
+    def __init__(self, pretrained_model_name_or_path):
+        super().__init__()
+        self.tokenizer = BertTokenizer.from_pretrained(pretrained_model_name_or_path)
+        self.bert = BertModel.from_pretrained(pretrained_model_name_or_path)
+    
+    def forward(self, text):
+        if isinstance(text, torch.Tensor):
+            if text.dim() == 0:  # テンソルがスカラーの場合
+                text = str(text.item())  # テンソルを文字列に変換
+            else:  # テンソルがベクトルまたは行列の場合
+                text = [str(t.item()) for t in text.view(-1)]  # 各要素を文字列に変換してリスト化
+        
+        # tokenizerを用いてトークン化とパディングを行う
+        # inputs = self.tokenizer(text, padding=True, truncation=True, return_tensors='pt')
+        inputs = self.tokenizer(text, padding='max_length', max_length=128, truncation=True, return_tensors='pt')
+        input_ids = inputs['input_ids'].to("cuda" if torch.cuda.is_available() else "cpu")
+        attention_mask = inputs['attention_mask'].to("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # BERTによる分散表現の取得
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        pooled_output = outputs.pooler_output  # BERTの出力から特徴量を取得
+        
+        return pooled_output
+
+
+    
 
 class VQAModel(nn.Module):
     def __init__(self, vocab_size: int, n_answer: int):
         super().__init__()
-        self.resnet = ResNet18()
+        # self.resnet = ResNet18()
+        self.resnet = ResNet50()
         self.text_encoder = nn.Linear(vocab_size, 512)
+
+        # self.text_encoder = TextEncoder('bert-base-uncased')
 
         self.fc = nn.Sequential(
             nn.Linear(1024, 512),
@@ -303,6 +386,7 @@ class VQAModel(nn.Module):
         image_feature = self.resnet(image)  # 画像の特徴量
         question_feature = self.text_encoder(question)  # テキストの特徴量
 
+        # 画像特徴量と質問文特徴量を連結して全結合層に入力
         x = torch.cat([image_feature, question_feature], dim=1)
         x = self.fc(x)
 
@@ -368,16 +452,26 @@ def main():
         transforms.Resize((224, 224)),
         transforms.ToTensor()
     ])
+    ### NOTE: 画像データの前処理とデータ拡張
+    # transform = transforms.Compose([
+    #     transforms.Resize((224, 224)),  # Resize image to a standard size
+    #     transforms.RandomHorizontalFlip(),  # Randomly flip the image horizontally
+    #     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),  # Color jittering
+    #     transforms.ToTensor(),  # Convert PIL Image to tensor
+    #     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Normalize the image
+    # ])
     train_dataset = VQADataset(df_path="./data/train.json", image_dir="./data/train", transform=transform)
     test_dataset = VQADataset(df_path="./data/valid.json", image_dir="./data/valid", transform=transform, answer=False)
     test_dataset.update_dict(train_dataset)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
+    # train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     model = VQAModel(vocab_size=len(train_dataset.question2idx)+1, n_answer=len(train_dataset.answer2idx)).to(device)
 
     # optimizer / criterion
+    # num_epoch = 20
     num_epoch = 20
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
