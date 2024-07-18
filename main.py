@@ -169,16 +169,7 @@ class VQADataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.df)
     
-    ### NOTE: 大文字・小文字の統一と冠詞の削除
-    # def preprocess_question(self, question):
-    #     # 大文字・小文字を統一する
-    #     question = question.lower()
-    #     # 冠詞の削除
-    #     question = re.sub(r'\b(a|an|the)\b', '', question)
-    #     # 不要な空白の削除
-    #     question = question.strip()
-    #     return question
-    
+    ### NOTE: 大文字・小文字の統一と冠詞の削除など
     def preprocess_question(self, question):
         # Convert to lowercase
         question = question.lower()
@@ -337,34 +328,6 @@ def ResNet18():
 
 def ResNet50():
     return ResNet(BottleneckBlock, [3, 4, 6, 3])
-
-### NOTE: tokenizerを用いた分散表現
-class TextEncoder(nn.Module):
-    def __init__(self, pretrained_model_name_or_path):
-        super().__init__()
-        self.tokenizer = BertTokenizer.from_pretrained(pretrained_model_name_or_path)
-        self.bert = BertModel.from_pretrained(pretrained_model_name_or_path)
-    
-    def forward(self, text):
-        if isinstance(text, torch.Tensor):
-            if text.dim() == 0:  # テンソルがスカラーの場合
-                text = str(text.item())  # テンソルを文字列に変換
-            else:  # テンソルがベクトルまたは行列の場合
-                text = [str(t.item()) for t in text.view(-1)]  # 各要素を文字列に変換してリスト化
-        
-        # tokenizerを用いてトークン化とパディングを行う
-        # inputs = self.tokenizer(text, padding=True, truncation=True, return_tensors='pt')
-        inputs = self.tokenizer(text, padding='max_length', max_length=128, truncation=True, return_tensors='pt')
-        input_ids = inputs['input_ids'].to("cuda" if torch.cuda.is_available() else "cpu")
-        attention_mask = inputs['attention_mask'].to("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # BERTによる分散表現の取得
-        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        pooled_output = outputs.pooler_output  # BERTの出力から特徴量を取得
-        
-        return pooled_output
-
-
     
 
 class VQAModel(nn.Module):
@@ -373,8 +336,6 @@ class VQAModel(nn.Module):
         # self.resnet = ResNet18()
         self.resnet = ResNet50()
         self.text_encoder = nn.Linear(vocab_size, 512)
-
-        # self.text_encoder = TextEncoder('bert-base-uncased')
 
         self.fc = nn.Sequential(
             nn.Linear(1024, 512),
@@ -472,7 +433,7 @@ def main():
 
     # optimizer / criterion
     # num_epoch = 20
-    num_epoch = 20
+    num_epoch = 10
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
 
